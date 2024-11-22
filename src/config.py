@@ -26,7 +26,7 @@ VAULTS = {
         'name': 'Moonwell USDC Vault'
     },
     'Gauntlet': {
-        'address': '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+        'address': '0xc0c5689e6f4D256E861F65465b691aeEcC0dEb12',
         'name': 'Gauntlet USDC Vault'
     },
     'Re7': {
