@@ -114,10 +114,31 @@ class LendingStrategyBacktester:
         """Plot performance comparison of all strategies"""
         plt.figure(figsize=(12, 8))
         
+        # Calculate 7-day moving averages and overall averages
+        moving_averages = {}
+        overall_averages = {}
+        
         for strategy_name, metrics in results.items():
             values = metrics['portfolio_values']
-            normalized_values = [v / values[0] for v in values]  # Normalize to starting value
-            plt.plot(normalized_values, label=strategy_name)
+            
+            # Normalize to starting value
+            normalized_values = [v / values[0] for v in values]
+            
+            # Calculate daily returns
+            daily_returns = np.diff(normalized_values) / normalized_values[:-1]
+            
+            # Convert to APY (annualized percentage yield)
+            daily_apy = (1 + daily_returns) ** 365 - 1
+            
+            # Calculate 7-day moving average of APY
+            moving_avg = pd.Series(daily_apy).rolling(window=7).mean()
+            moving_averages[strategy_name] = moving_avg
+            
+            # Calculate overall average APY
+            overall_averages[strategy_name] = np.mean(daily_apy) * 100
+            
+            # Plot normalized values
+            plt.plot(normalized_values, label=f"{strategy_name}")
         
         plt.title('Strategy Performance Comparison (Normalized)')
         plt.xlabel('Time Period')
@@ -125,29 +146,41 @@ class LendingStrategyBacktester:
         plt.legend()
         plt.grid(True)
         
-        # Add summary table
+        # Create a second figure for APY moving averages
+        plt.figure(figsize=(12, 8))
+        for strategy_name, moving_avg in moving_averages.items():
+            plt.plot(moving_avg, label=f"{strategy_name} 7-day Avg APY")
+            
+        plt.title('7-Day Moving Average APY')
+        plt.xlabel('Time Period')
+        plt.ylabel('APY (%)')
+        plt.legend()
+        plt.grid(True)
+        
+        # Add summary table with new metrics
         summary_data = {
             'Total Return': [f"{metrics['total_return']*100:.2f}%" for metrics in results.values()],
             'Sharpe Ratio': [f"{metrics['sharpe_ratio']:.2f}" for metrics in results.values()],
-            'Max Drawdown': [f"{metrics['max_drawdown']*100:.2f}%" for metrics in results.values()]
+            'Max Drawdown': [f"{metrics['max_drawdown']*100:.2f}%" for metrics in results.values()],
+            'Avg 2M APY': [f"{overall_averages[name]:.2f}%" for name in results.keys()]
         }
         
         summary_df = pd.DataFrame(summary_data, index=results.keys())
+        plt.figure(figsize=(12, 4))
+        plt.axis('off')
         plt.table(cellText=summary_df.values,
                  rowLabels=summary_df.index,
                  colLabels=summary_df.columns,
                  cellLoc='center',
-                 loc='bottom',
-                 bbox=[0, -0.5, 1, 0.3])
+                 loc='center',
+                 bbox=[0.1, 0.1, 0.8, 0.8])
         
         plt.tight_layout()
-        plt.subplots_adjust(bottom=0.3)
-        return plt.gcf()
-
+        return [plt.figure(n) for n in plt.get_fignums()]
+    
 def main():
     backtester = LendingStrategyBacktester()
     
-    # Backtest and compare USDC and WETH strategies
     results = backtester.compare_all_strategies(
         'USDC', 
         [123456, 123457, 123458], 
@@ -155,17 +188,22 @@ def main():
         BACKTEST_CONFIG['end_date']
     )
     
-    # Print results
+    # Print results with APY
     for strategy, performance in results.items():
+        returns = np.diff(performance['portfolio_values']) / performance['portfolio_values'][:-1]
+        apy = np.mean((1 + returns) ** 365 - 1) * 100
+        
         print(f"{strategy} Strategy Performance:")
         print(f"Total Return: {performance['total_return']*100:.2f}%")
+        print(f"Average APY: {apy:.2f}%")
         print(f"Sharpe Ratio: {performance['sharpe_ratio']:.2f}")
         print(f"Max Drawdown: {performance['max_drawdown']*100:.2f}%\n")
     
     # Plot performance
-    fig = backtester.plot_performance_comparison(results)
-    fig.savefig('strategy_performance.png')
-    plt.close()
+    figs = backtester.plot_performance_comparison(results)
+    for i, fig in enumerate(figs):
+        fig.savefig(f'strategy_performance_{i+1}.png')
+    plt.close('all')
 
 if __name__ == '__main__':
     main()
