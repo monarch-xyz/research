@@ -198,7 +198,7 @@ def _monarch_api_url() -> str:
         value = _env(key)
         if value:
             return value
-    return "https://indexer.hyperindex.xyz/fa02682/v1/graphql"
+    raise RuntimeError("Monarch endpoint not configured. Set MONARCH_INDEXER_ENDPOINT or MONARCH_API_ENDPOINT locally.")
 
 
 def _monarch_api_key() -> str | None:
