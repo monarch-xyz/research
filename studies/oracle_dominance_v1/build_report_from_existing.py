@@ -125,6 +125,46 @@ def plot_line_chart(series: dict[str, list[tuple[int, float]]], title: str, outp
     plt.close(fig)
 
 
+def normalize_share_series(series: dict[str, list[tuple[int, float]]]) -> dict[str, list[tuple[int, float]]]:
+    totals: dict[int, float] = defaultdict(float)
+    for values in series.values():
+        for ts, value in values:
+            totals[ts] += value
+
+    normalized: dict[str, list[tuple[int, float]]] = {}
+    for vendor, values in series.items():
+        normalized[vendor] = []
+        for ts, value in values:
+            total = totals.get(ts, 0.0)
+            share = 0.0 if total <= 0 else value / total * 100
+            normalized[vendor].append((ts, share))
+    return normalized
+
+
+def plot_share_chart(series: dict[str, list[tuple[int, float]]], title: str, output_png: Path, output_svg: Path) -> None:
+    apply_monarch_style(plt)
+    fig, ax = plt.subplots(figsize=(12, 7))
+    fig.patch.set_facecolor(PANEL)
+    ax.set_facecolor(PANEL)
+    for index, (vendor, values) in enumerate(series.items()):
+        xs = [dt.datetime.utcfromtimestamp(ts) for ts, _ in values]
+        ys = [value for _, value in values]
+        color = MUTED if vendor == "Other" else series_color(index)
+        ax.plot(xs, ys, label=vendor, color=color, linewidth=2.4)
+    ax.set_title(title)
+    ax.set_ylabel("Share of total exposure (%)")
+    ax.set_xlabel("date")
+    ax.set_ylim(0, 100)
+    ax.grid(True, axis="y")
+    legend = ax.legend(frameon=True, ncols=2)
+    for text in legend.get_texts():
+        text.set_color(TEXT)
+    fig.tight_layout()
+    fig.savefig(output_png, dpi=180)
+    fig.savefig(output_svg)
+    plt.close(fig)
+
+
 def plot_growth_chart(rows: list[dict[str, object]], title: str, output_png: Path, output_svg: Path) -> None:
     apply_monarch_style(plt)
     top_rows = [row for row in rows if row["pct_gain"] is not None][:8]
@@ -196,6 +236,7 @@ def main() -> None:
     current_totals = aggregate_current_vendor_totals(current_rows)
     repriced_series = load_series(historical_rows, PRIMARY_METRIC)
     top_line_series = filter_top_vendors(repriced_series, top_n=8)
+    top_share_series = normalize_share_series(top_line_series)
     growth_rows = build_growth_rows(repriced_series)
 
     write_csv(OUTPUT_DIR / "vendor_current_totals.csv", current_totals)
@@ -206,6 +247,12 @@ def main() -> None:
         "Oracle dominance over time (repriced supply)",
         OUTPUT_DIR / "oracle_dominance_from_existing.png",
         OUTPUT_DIR / "oracle_dominance_from_existing.svg",
+    )
+    plot_share_chart(
+        top_share_series,
+        "Oracle share over time (repriced supply, normalized to 100%)",
+        OUTPUT_DIR / "oracle_share_from_existing.png",
+        OUTPUT_DIR / "oracle_share_from_existing.svg",
     )
     plot_growth_chart(
         growth_rows,
