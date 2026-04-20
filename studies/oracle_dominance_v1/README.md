@@ -1,82 +1,64 @@
 # Oracle Dominance v1
 
-This folder is the reusable starting point for Monarch / Morpho oracle research.
+Reusable research pipeline for Morpho market-level oracle vendor dominance.
 
-## Why this exists
+## Structure
 
-The goal is to stop re-deriving the same workflow every time we want to publish a market-structure or oracle-vendor post.
+- `run.py`: CLI entrypoint for public reruns
+- `pipeline.py`: high-level orchestration and reusable exports
+- `models.py`: shared data classes
+- `analysis.py`: oracle path decomposition, allocation, and aggregation
+- `clients/morpho.py`: Morpho GraphQL market + historical time-series client
+- `clients/monarch.py`: Monarch indexer market universe client
+- `clients/oracle_gist.py`: scanner gist metadata client
+- `utils/env.py`: local env resolution (read-only; does not write secrets)
+- `utils/http.py`: shared JSON HTTP helpers
+- `build_oracle_dominance_report.py`: chart/report builder from live pipeline functions
+- `build_report_from_existing.py`: chart/report builder from existing CSV outputs
+- `output/`: gitignored study outputs
 
-This v1 pipeline is built around code that already exists in:
-- Monarch frontend market + historical fetchers
-- the `oracles` scanner and its published metadata
+## Method
 
-## Canonical inputs
+1. Fetch live markets and apply cutoff/filter policy.
+2. Break each market oracle path into recognized vendors and assumption legs.
+3. Build current exposure totals and historical vendor time-series.
 
-### 1. Market discovery
-Use Monarch-first market discovery, with Morpho API as the fallback reference.
+## CLI
 
-Relevant files:
-- `../src/sources/monarchApi.ts`
-- `/Users/anton/projects/monarch/src/data-sources/morpho-api/market.ts`
-- `/Users/anton/projects/monarch/src/graphql/morpho-api-queries.ts`
-
-### 2. Oracle composition
-Use scanner-native oracle metadata, not ad hoc parsing.
-
-Relevant files:
-- `../src/types.ts`
-- `../src/scanner.ts`
-- `../src/analyzers/feedProviderMatcher.ts`
-- `/Users/anton/projects/monarch/src/hooks/useOracleMetadata.ts`
-
-### 3. Historical market state
-Use Morpho historical market state shape as the reference time series.
-
-Relevant file:
-- `/Users/anton/projects/monarch/src/data-sources/morpho-api/historical.ts`
-
-## v1 attribution rules
-
-1. A market's oracle composition is treated as immutable.
-2. Extract all recognized vendor legs from the market's oracle metadata.
-3. Split market responsibility evenly across recognized vendors.
-4. Track hardcoded / non-vendor legs separately.
-5. Keep both supply-weighted and borrow-weighted exposure.
-6. For the special "current price applied to historical balances" view, reprice historical token balances using the latest token USD price.
-
-## Intended outputs
-
-- `vendor_dominance_current.csv`
-- `vendor_dominance_6m.csv`
-- `hardcoded_exposure_summary.csv`
-- `oracle_dominance_6m.svg`
-- `oracle_dominance_6m.png`
-- `oracle_top_growers_6m.svg`
-- `oracle_top_growers_6m.png`
-
-## Publishing workflow
-
-1. run analysis
-2. inspect output tables
-3. generate charts
-4. draft research summary
-5. apply anti-slop editing
-6. publish findings and source code together
-
-## Run it
-
-From `/Users/anton/projects/oracles`:
+Run from repo root:
 
 ```bash
-python3 research/oracle_dominance_v1/run.py --output-dir research/oracle_dominance_v1/output --days 180
+python3 -m studies.oracle_dominance_v1.run \
+  --output-dir studies/oracle_dominance_v1/output \
+  --days 180 \
+  --min-borrow-usd 500000 \
+  --recognized-tokens-only
+
+python3 -m studies.oracle_dominance_v1.build_oracle_dominance_report \
+  --days 90 \
+  --top-markets 100 \
+  --min-borrow-usd 500000 \
+  --recognized-tokens-only
 ```
 
-This currently writes CSV outputs for:
-- current vendor dominance
-- 6 month vendor time series
-- hardcoded exposure summary
+Optional methodology flags:
 
-## Notes
+- `--require-listed`: include only markets present in the Monarch indexer universe
+- `--recognized-tokens-only`: exclude unknown-token-symbol markets
 
-This folder is deliberately Python-first for plotting speed and notebook ergonomics.
-The source of truth still comes from the TypeScript repos above.
+Default methodology is public-data oriented:
+
+- `min borrow USD`: `500000`
+- `require listed`: `false`
+- `recognized tokens only`: `false`
+
+## Outputs
+
+Primary CSV outputs:
+
+- `vendor_dominance_current.csv`
+- `vendor_dominance_<days>d.csv`
+- `hardcoded_exposure_summary.csv`
+
+Current note:
+- assumption exposure outputs in this v1 study are still heuristic and should not be treated as final public headline numbers until the shared assumption engine is locked.

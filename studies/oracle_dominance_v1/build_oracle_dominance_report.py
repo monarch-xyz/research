@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import argparse
 import csv
+import datetime as dt
 import json
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -9,7 +11,7 @@ from typing import Iterable
 
 import matplotlib.pyplot as plt
 
-from pipeline import (
+from studies.oracle_dominance_v1.pipeline import (
     MarketRef,
     allocate_evenly,
     build_current_exposure_table,
@@ -19,11 +21,12 @@ from pipeline import (
     fetch_oracle_metadata,
     infer_current_loan_asset_prices,
 )
-from plot_style import MUTED, MONARCH_PRIMARY, PANEL, TEXT, apply_monarch_style, series_color
+from studies.oracle_dominance_v1.plot_style import MUTED, MONARCH_PRIMARY, PANEL, TEXT, apply_monarch_style, series_color
 
-OUTPUT_DIR = Path(__file__).resolve().parent / "output"
+BASE_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = BASE_DIR / "output"
 TOP_HISTORY_MARKETS = 100
-HISTORY_DAYS = 180
+HISTORY_DAYS = 90
 MAX_WORKERS = 12
 PRIMARY_METRIC = "repriced_supply_usd"
 
@@ -48,6 +51,20 @@ def aggregate_current_vendor_totals(current_rows: list[dict]) -> list[dict]:
     return rows
 
 
+def aggregate_current_assumption_totals(current_rows: list[dict]) -> list[dict]:
+    totals: dict[tuple[str, str], float] = defaultdict(float)
+    for row in current_rows:
+        for metric_key, output_metric in (("assumption_supply_split_json", "supply_usd"), ("assumption_borrow_split_json", "borrow_usd")):
+            for assumption, value in parse_json_map(row.get(metric_key, "")).items():
+                totals[(assumption, output_metric)] += value
+
+    rows = [
+        {"assumption": assumption, "metric": metric, "exposure_usd": round(value, 2)}
+        for (assumption, metric), value in sorted(totals.items(), key=lambda item: (item[0][1], -item[1], item[0][0]))
+    ]
+    return rows
+
+
 def select_top_history_markets(markets: list[MarketRef], metadata: dict, top_n: int) -> list[tuple[MarketRef, list[str]]]:
     scored: list[tuple[MarketRef, list[str]]] = []
     for market in markets:
@@ -63,8 +80,8 @@ def select_top_history_markets(markets: list[MarketRef], metadata: dict, top_n: 
     return scored[:top_n]
 
 
-def fetch_one_history(market: MarketRef, vendors: list[str], current_prices: dict[tuple[int, str], float]) -> tuple[MarketRef, list[dict], list[str]]:
-    history = fetch_market_history(market.unique_key, market.chain_id, days=HISTORY_DAYS)
+def fetch_one_history(market: MarketRef, vendors: list[str], current_prices: dict[tuple[int, str], float], days: int) -> tuple[MarketRef, list[dict], list[str]]:
+    history = fetch_market_history(market.unique_key, market.chain_id, days=days)
     current_price = current_prices.get((market.chain_id, market.loan_asset_address))
     rows: list[dict] = []
     for point in history:
@@ -89,12 +106,12 @@ def fetch_one_history(market: MarketRef, vendors: list[str], current_prices: dic
     return market, rows, vendors
 
 
-def build_historical_vendor_series(selected: list[tuple[MarketRef, list[str]]], current_prices: dict[tuple[int, str], float]) -> tuple[list[dict], list[str]]:
+def build_historical_vendor_series(selected: list[tuple[MarketRef, list[str]]], current_prices: dict[tuple[int, str], float], days: int) -> tuple[list[dict], list[str]]:
     totals: dict[tuple[str, str, str], float] = defaultdict(float)
     errors: list[str] = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {
-            executor.submit(fetch_one_history, market, vendors, current_prices): (market, vendors)
+            executor.submit(fetch_one_history, market, vendors, current_prices, days): (market, vendors)
             for market, vendors in selected
         }
         for future in as_completed(futures):
@@ -163,7 +180,7 @@ def plot_line_chart(series: dict[str, list[tuple[int, float]]], title: str, outp
     fig.patch.set_facecolor(PANEL)
     ax.set_facecolor(PANEL)
     for index, (vendor, values) in enumerate(series.items()):
-        xs = [ts for ts, _ in values]
+        xs = [dt.datetime.utcfromtimestamp(ts) for ts, _ in values]
         ys = [value / 1_000_000 for _, value in values]
         color = series_color(index)
         if vendor == "Other":
@@ -171,7 +188,47 @@ def plot_line_chart(series: dict[str, list[tuple[int, float]]], title: str, outp
         ax.plot(xs, ys, label=vendor, color=color, linewidth=2.4)
     ax.set_title(title)
     ax.set_ylabel("USD exposure (millions)")
-    ax.set_xlabel("timestamp")
+    ax.set_xlabel("date")
+    ax.grid(True, axis="y")
+    legend = ax.legend(frameon=True, ncols=2)
+    for text in legend.get_texts():
+        text.set_color(TEXT)
+    fig.tight_layout()
+    fig.savefig(output_png, dpi=180)
+    fig.savefig(output_svg)
+    plt.close(fig)
+
+
+def normalize_share_series(series: dict[str, list[tuple[int, float]]]) -> dict[str, list[tuple[int, float]]]:
+    totals: dict[int, float] = defaultdict(float)
+    for values in series.values():
+        for ts, value in values:
+            totals[ts] += value
+
+    normalized: dict[str, list[tuple[int, float]]] = {}
+    for vendor, values in series.items():
+        normalized[vendor] = []
+        for ts, value in values:
+            total = totals.get(ts, 0.0)
+            share = 0.0 if total <= 0 else value / total * 100
+            normalized[vendor].append((ts, share))
+    return normalized
+
+
+def plot_share_chart(series: dict[str, list[tuple[int, float]]], title: str, output_png: Path, output_svg: Path) -> None:
+    apply_monarch_style(plt)
+    fig, ax = plt.subplots(figsize=(12, 7))
+    fig.patch.set_facecolor(PANEL)
+    ax.set_facecolor(PANEL)
+    for index, (vendor, values) in enumerate(series.items()):
+        xs = [dt.datetime.utcfromtimestamp(ts) for ts, _ in values]
+        ys = [value for _, value in values]
+        color = MUTED if vendor == "Other" else series_color(index)
+        ax.plot(xs, ys, label=vendor, color=color, linewidth=2.4)
+    ax.set_title(title)
+    ax.set_ylabel("Share of total exposure (%)")
+    ax.set_xlabel("date")
+    ax.set_ylim(0, 100)
     ax.grid(True, axis="y")
     legend = ax.legend(frameon=True, ncols=2)
     for text in legend.get_texts():
@@ -224,7 +281,7 @@ def plot_growth_chart(rows: list[dict], title: str, output_png: Path, output_svg
     plt.close(fig)
 
 
-def write_summary(current_totals: list[dict], growth_rows: list[dict], history_errors: list[str], selected_count: int, output_path: Path) -> None:
+def write_summary(current_totals: list[dict], assumption_totals: list[dict], growth_rows: list[dict], history_errors: list[str], selected_count: int, output_path: Path) -> None:
     supply = [row for row in current_totals if row["metric"] == "supply_usd"]
     total_supply = sum(row["exposure_usd"] for row in supply)
     top_three = supply[:3]
@@ -234,6 +291,7 @@ def write_summary(current_totals: list[dict], growth_rows: list[dict], history_e
         f"- Historical series built from the top {selected_count} current markets by supply using immutable oracle composition.",
         f"- Current recognized supply exposure in this cut: ${total_supply:,.0f}.",
         f"- Top 3 current supply vendors: " + ", ".join(f"{row['vendor']} (${row['exposure_usd']:,.0f})" for row in top_three) + ".",
+        "- Assumption totals are still heuristic in this version and are excluded from the headline summary until the shared assumption engine is locked.",
     ]
     if growth_rows:
         best = growth_rows[0]
@@ -244,41 +302,79 @@ def write_summary(current_totals: list[dict], growth_rows: list[dict], history_e
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description='Build oracle dominance report from live research fetches')
+    parser.add_argument('--days', type=int, default=HISTORY_DAYS, help='Historical lookback window in days')
+    parser.add_argument('--top-markets', type=int, default=TOP_HISTORY_MARKETS, help='Number of markets to include in history build')
+    parser.add_argument('--min-borrow-usd', type=float, default=500_000, help='Minimum current market borrow USD for inclusion')
+    parser.add_argument('--require-listed', action='store_true', help='Only include markets present in the Monarch indexer universe')
+    parser.add_argument('--recognized-tokens-only', action='store_true', help='Exclude markets whose token symbols are unknown')
+    args = parser.parse_args()
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    markets = fetch_live_markets()
-    metadata = fetch_oracle_metadata()
+    markets = fetch_live_markets(
+        min_borrow_usd=args.min_borrow_usd,
+        require_listed=args.require_listed,
+        recognized_tokens_only=args.recognized_tokens_only,
+    )
+    metadata = fetch_oracle_metadata(markets)
     current_prices = infer_current_loan_asset_prices(markets)
     current_rows = build_current_exposure_table(markets, metadata)
     current_totals = aggregate_current_vendor_totals(current_rows)
-    selected = select_top_history_markets(markets, metadata, TOP_HISTORY_MARKETS)
-    historical_rows, history_errors = build_historical_vendor_series(selected, current_prices)
+    assumption_totals = aggregate_current_assumption_totals(current_rows)
+    selected = select_top_history_markets(markets, metadata, args.top_markets)
+    historical_rows, history_errors = build_historical_vendor_series(selected, current_prices, days=args.days)
     growth_rows = build_growth_rows(load_series(historical_rows, PRIMARY_METRIC))
 
+    suffix = f"{args.days}d_top{args.top_markets}"
     write_csv(OUTPUT_DIR / 'vendor_current_totals.csv', current_totals)
-    write_csv(OUTPUT_DIR / 'vendor_dominance_180d_top100.csv', historical_rows)
-    write_csv(OUTPUT_DIR / 'vendor_growth_180d_top100.csv', growth_rows)
-    write_csv(OUTPUT_DIR / 'history_errors.csv', [{"error": error} for error in history_errors])
+    write_csv(OUTPUT_DIR / 'assumption_current_totals.csv', assumption_totals)
+    write_csv(
+        OUTPUT_DIR / 'markets_with_assumptions.csv',
+        [
+            row
+            for row in current_rows
+            if int(row.get('assumption_count', 0) or 0) > 0
+        ],
+    )
+    write_csv(OUTPUT_DIR / f'vendor_dominance_{suffix}.csv', historical_rows)
+    write_csv(OUTPUT_DIR / f'vendor_growth_{suffix}.csv', growth_rows)
+    write_csv(OUTPUT_DIR / f'history_errors_{suffix}.csv', [{"error": error} for error in history_errors])
 
     top_line_series = filter_top_vendors(load_series(historical_rows, PRIMARY_METRIC), top_n=8)
     plot_line_chart(
         top_line_series,
-        'Oracle dominance over time (repriced supply, top 100 markets)',
-        OUTPUT_DIR / 'oracle_dominance_180d_top100.png',
-        OUTPUT_DIR / 'oracle_dominance_180d_top100.svg',
+        f'Oracle dominance over time (repriced supply, top {args.top_markets} markets)',
+        OUTPUT_DIR / f'oracle_dominance_{suffix}.png',
+        OUTPUT_DIR / f'oracle_dominance_{suffix}.svg',
     )
+    non_chainlink = {k: v for k, v in top_line_series.items() if k != 'Chainlink'}
+    if non_chainlink:
+        plot_line_chart(
+            non_chainlink,
+            f'Non-Chainlink oracle dominance over time (repriced supply, top {args.top_markets} markets)',
+            OUTPUT_DIR / f'oracle_dominance_non_chainlink_{suffix}.png',
+            OUTPUT_DIR / f'oracle_dominance_non_chainlink_{suffix}.svg',
+        )
+        plot_share_chart(
+            normalize_share_series(non_chainlink),
+            f'Non-Chainlink oracle share over time (normalized to 100%)',
+            OUTPUT_DIR / f'oracle_share_non_chainlink_{suffix}.png',
+            OUTPUT_DIR / f'oracle_share_non_chainlink_{suffix}.svg',
+        )
     plot_growth_chart(
         growth_rows,
         'Top oracle growers over the window',
-        OUTPUT_DIR / 'oracle_growth_180d_top100.png',
-        OUTPUT_DIR / 'oracle_growth_180d_top100.svg',
+        OUTPUT_DIR / f'oracle_growth_{suffix}.png',
+        OUTPUT_DIR / f'oracle_growth_{suffix}.svg',
     )
-    write_summary(current_totals, growth_rows, history_errors, len(selected), OUTPUT_DIR / 'RESEARCH_SUMMARY.md')
+    write_summary(current_totals, assumption_totals, growth_rows, history_errors, len(selected), OUTPUT_DIR / 'RESEARCH_SUMMARY.md')
 
     print(json.dumps({
         'market_count': len(markets),
         'selected_history_markets': len(selected),
         'history_error_count': len(history_errors),
         'output_dir': str(OUTPUT_DIR),
+        'suffix': suffix,
     }, indent=2))
 
 

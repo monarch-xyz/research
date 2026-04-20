@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import datetime as dt
 import json
@@ -8,14 +9,29 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 
-from plot_style import MUTED, MONARCH_PRIMARY, PANEL, TEXT, apply_monarch_style, series_color
+from studies.oracle_dominance_v1.plot_style import MUTED, MONARCH_PRIMARY, PANEL, TEXT, apply_monarch_style, series_color
 
 BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = BASE_DIR / "output"
 CURRENT_CSV = OUTPUT_DIR / "vendor_dominance_current.csv"
-HISTORICAL_CSV = OUTPUT_DIR / "vendor_dominance_6m.csv"
 HARDCODED_CSV = OUTPUT_DIR / "hardcoded_exposure_summary.csv"
 PRIMARY_METRIC = "repriced_supply_usd"
+
+
+def resolve_historical_csv(explicit_path: str | None) -> Path:
+    if explicit_path:
+        return Path(explicit_path)
+
+    exact_candidates = sorted(path for path in OUTPUT_DIR.glob("vendor_dominance_*d.csv") if path.name != CURRENT_CSV.name)
+    if exact_candidates:
+        return exact_candidates[-1]
+
+    fallback_candidates = sorted(
+        path for path in OUTPUT_DIR.glob("vendor_dominance_*d*.csv") if path.name != CURRENT_CSV.name
+    )
+    if not fallback_candidates:
+        raise FileNotFoundError("No historical vendor dominance CSV found. Pass --historical-csv explicitly.")
+    return fallback_candidates[-1]
 
 
 def load_csv(path: Path) -> list[dict[str, str]]:
@@ -188,7 +204,12 @@ def plot_growth_chart(rows: list[dict[str, object]], title: str, output_png: Pat
     plt.close(fig)
 
 
-def build_summary(current_totals: list[dict[str, object]], growth_rows: list[dict[str, object]], hardcoded_rows: list[dict[str, str]]) -> str:
+def build_summary(
+    current_totals: list[dict[str, object]],
+    growth_rows: list[dict[str, object]],
+    hardcoded_rows: list[dict[str, str]],
+    historical_rows: list[dict[str, str]],
+) -> str:
     supply = [row for row in current_totals if row["metric"] == "supply_usd"]
     borrow = [row for row in current_totals if row["metric"] == "borrow_usd"]
     total_supply = sum(float(row["exposure_usd"]) for row in supply)
@@ -196,12 +217,13 @@ def build_summary(current_totals: list[dict[str, object]], growth_rows: list[dic
     top_supply = supply[:5]
     best_growth = growth_rows[:5]
     hardcoded = {row["metric"]: float(row["value"]) for row in hardcoded_rows}
+    point_count = len(load_series(historical_rows, PRIMARY_METRIC).get("Chainlink", []))
 
     lines = [
         "# Oracle dominance research summary",
         "",
-        "We did this to put the Chronicle and Midas support work in context.",
-        "The point was not just to say Monarch shows two more oracle vendors. The point was to see where those vendors sit inside the broader Morpho / Monarch oracle stack.",
+        f"This report summarizes the current oracle vendor mix and recent exposure trend across the selected market set.",
+        f"Current supply-weighted exposure in this cut: ${total_supply:,.0f}. Current borrow-weighted exposure: ${total_borrow:,.0f}.",
         "",
         "## Current supply dominance",
     ]
@@ -211,9 +233,7 @@ def build_summary(current_totals: list[dict[str, object]], growth_rows: list[dic
     lines.extend([
         "",
         "## What stands out",
-        f"- Chainlink is still the clear center of gravity by a wide margin: ${float(top_supply[0]['exposure_usd']):,.0f} of current supply-weighted exposure in this dataset.",
-        f"- Chronicle is already meaningful in context, not just as a new logo: ${next(float(r['exposure_usd']) for r in top_supply if r['vendor']=='Chronicle'):,.0f} of current supply-weighted exposure.",
-        f"- Midas is smaller today, but not trivial: ${next(float(r['exposure_usd']) for r in supply if r['vendor']=='midas'):,.0f} of current supply-weighted exposure.",
+        f"- The largest current vendor is {top_supply[0]['vendor']} at ${float(top_supply[0]['exposure_usd']):,.0f} of supply-weighted exposure.",
         f"- Markets with hardcoded legs still matter: {hardcoded.get('markets_with_hardcoded_legs', 0):,.0f} markets, ${hardcoded.get('supply_assets_usd', 0):,.0f} supply, ${hardcoded.get('borrow_assets_usd', 0):,.0f} borrow.",
         "",
         "## Fastest growers over the observed window",
@@ -222,16 +242,22 @@ def build_summary(current_totals: list[dict[str, object]], growth_rows: list[dic
         lines.append(f"- {row['vendor']}: {float(row['pct_gain']):.2f}% growth, ${float(row['abs_gain_usd']):,.0f} absolute gain")
     lines.extend([
         "",
-        f"Observed window in the current output: {len(load_series(load_csv(HISTORICAL_CSV), PRIMARY_METRIC).get('Chainlink', []))} daily points over roughly 30 days.",
-        "This is enough to show the current hierarchy and short-window growth, but it is not yet the full 6-month cut we want.",
+        f"Observed window in the current output: {point_count} daily points.",
     ])
     return "\n".join(lines) + "\n"
 
 
 def main() -> None:
-    current_rows = load_csv(CURRENT_CSV)
-    historical_rows = load_csv(HISTORICAL_CSV)
-    hardcoded_rows = load_csv(HARDCODED_CSV)
+    parser = argparse.ArgumentParser(description="Build charts and summary from existing oracle dominance CSV outputs")
+    parser.add_argument("--current-csv", default=str(CURRENT_CSV), help="Path to vendor_dominance_current.csv")
+    parser.add_argument("--historical-csv", default=None, help="Path to a historical vendor dominance CSV")
+    parser.add_argument("--hardcoded-csv", default=str(HARDCODED_CSV), help="Path to hardcoded_exposure_summary.csv")
+    args = parser.parse_args()
+
+    current_rows = load_csv(Path(args.current_csv))
+    historical_csv = resolve_historical_csv(args.historical_csv)
+    historical_rows = load_csv(historical_csv)
+    hardcoded_rows = load_csv(Path(args.hardcoded_csv))
 
     current_totals = aggregate_current_vendor_totals(current_rows)
     repriced_series = load_series(historical_rows, PRIMARY_METRIC)
@@ -261,7 +287,7 @@ def main() -> None:
         OUTPUT_DIR / "oracle_growth_from_existing.svg",
     )
 
-    summary = build_summary(current_totals, growth_rows, hardcoded_rows)
+    summary = build_summary(current_totals, growth_rows, hardcoded_rows, historical_rows)
     (OUTPUT_DIR / "RESEARCH_SUMMARY.md").write_text(summary, encoding="utf-8")
     print(summary)
 
